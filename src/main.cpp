@@ -1,13 +1,18 @@
 #include <Arduino.h>
 
 #define USE_NO_SEND_PWM
-#define IR_SEND_PIN 9
+#define IR_SEND_PIN 12
 #include <IRremote.hpp>
+
+#include <WiFi.h>
+#include <aWOT.h>
+
+#include "secrets.h"
 
 const int numInputs = 5;
 
-const int inputPins[numInputs] = {8, 7, 6, 5, 4};
-const int idlePin = 3;
+const int inputLedPins[numInputs] = {11, 10, 9, 8, 7};
+const int idleLedPin = 6;
 
 const int necInputCommands[numInputs] = {0x1b, 0x1e, 0x0d, 0x12, 0x10};
 const int necAddress = 0x01;
@@ -16,76 +21,150 @@ const int necSleepCommand = 0x1f;
 const int necNextInputCommand = 0x0c;
 const int necPrevInputCommand = 0x05;
 
-void setup()
-{
-  pinMode(LED_BUILTIN, OUTPUT);
-  for (int i = 0; i < numInputs; i++) {
-    pinMode(inputPins[i], INPUT);
-  }
-  Serial.begin(9600);
-  IrSender.begin();
-}
+WiFiServer server(80);
+Application app;
 
-void sendCommand(int command)
+void sendCommand(int command, Response &res)
 {
-  Serial.print("Sending NEC: ");
+  res.print("Sent NEC ");
   char buffer[32];
   sprintf(buffer, "address=%02X, function=%02X", necAddress, command);
-  Serial.println(buffer);
+  res.println(buffer);
   IrSender.sendNEC(necAddress, command, 0);
 }
 
 int checkState()
 {
-  for (int i = 0; i < numInputs; i++) {
-    if (digitalRead(inputPins[i]) == LOW) {
-      return i + 1;
+  if (digitalRead(idleLedPin) == HIGH) {
+    for (int i = 0; i < numInputs; i++) {
+      if (digitalRead(inputLedPins[i]) == LOW) {
+        return i + 1;
+      }
     }
-  }
-  if (digitalRead(idlePin) == LOW) {
+    return -1;
+  } else {
     return 0;
   }
-  return -1;
+}
+
+void index(Request &req, Response &res)
+{
+  res.println("# API");
+
+  res.println("- GET `/status` : get switch status");
+
+  res.print("- GET `/input/[1-");
+  res.print(numInputs);
+  res.println("]` : switch directly to input");
+
+  res.println("- GET `/next` : switch to next input");
+  res.println("- GET `/prev` : switch to previous input");
+  res.println("- GET `/wake` : wake up switch from idle state");
+  res.println("- GET `/sleep` : put switch in idle state");
+}
+
+void getStatus(Request &req, Response &res)
+{
+  int input = checkState();
+  if (input == 0) {
+    res.println("Idle");
+  } else if (input == -1) {
+    res.status(500);
+    res.println("Unknown");
+  } else {
+    res.print("Input ");
+    res.println(input);
+  }
+}
+
+void setInput(Request &req, Response &res)
+{
+  char inputBuf[10];
+  req.route("input", inputBuf, 10);
+  int inputVal = atoi(inputBuf) - 1;
+
+  if (inputVal < 0 || inputVal >= numInputs) {
+    res.status(400);
+    res.println("Invalid input");
+  } else {
+    int input = checkState();
+    if (input <= 0) {
+      res.status(422);
+      res.println("Switch is not active");
+    } else {
+      sendCommand(necInputCommands[inputVal], res);
+    }
+  }
+}
+
+void wake(Request &req, Response &res)
+{
+  sendCommand(necWakeCommand, res);
+}
+
+void sleep(Request &req, Response &res)
+{
+  sendCommand(necSleepCommand, res);
+}
+
+void nextInput(Request &req, Response &res)
+{
+  int input = checkState();
+  if (input <= 0) {
+    res.status(422);
+    res.println("Switch is not active");
+  } else {
+    sendCommand(necNextInputCommand, res);
+  }
+}
+
+void prevInput(Request &req, Response &res)
+{
+  int input = checkState();
+  if (input <= 0) {
+    res.status(422);
+    res.println("Switch is not active");
+  } else {
+    sendCommand(necPrevInputCommand, res);
+  }
+}
+
+void setup()
+{
+  pinMode(LED_BUILTIN, OUTPUT);
+  pinMode(idleLedPin, INPUT);
+  for (int i = 0; i < numInputs; i++) {
+    pinMode(inputLedPins[i], INPUT);
+  }
+
+  Serial.begin(115200);
+  IrSender.begin();
+
+  Serial.print("Connecting ");
+  WiFi.begin(SECRET_SSID, SECRET_PASS);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(1000);
+    Serial.print(".");
+  }
+  Serial.println(WiFi.localIP());
+
+  app.get("/", &index);
+  app.get("/status", &getStatus);
+  app.get("/input/:input", &setInput);
+  app.get("/next", &nextInput);
+  app.get("/prev", &prevInput);
+  app.get("/wake", &wake);
+  app.get("/sleep", &sleep);
+
+  server.begin();
 }
 
 void loop()
 {
-  if (Serial.available()) {
-    char c = Serial.read();
+  WiFiClient client = server.available();
 
-    if (c >= '1' && c < '1' + numInputs) {
-      sendCommand(necInputCommands[c - '1']);
-    } else if (c == 'w') {
-      sendCommand(necWakeCommand);
-    } else if (c == 's') {
-      sendCommand(necSleepCommand);
-    } else if (c == 'n') {
-      sendCommand(necNextInputCommand);
-    } else if (c == 'p') {
-      sendCommand(necPrevInputCommand);
-    } else if (c == 'q') {
-      int currentInput = checkState();
-
-      Serial.print("Current input: ");
-      if (currentInput == 0) {
-        Serial.println("None");
-      } else if (currentInput == -1) {
-        Serial.println("Unknown");
-      } else {
-        Serial.println(currentInput);
-      }
-    } else if (c == '?') {
-      Serial.println("Commands:");
-      Serial.println("1-5: Select input");
-      Serial.println("w: Wake");
-      Serial.println("s: Sleep");
-      Serial.println("n: Next input");
-      Serial.println("p: Previous input");
-      Serial.println("q: Query current input");
-      Serial.println("?: Print this help");
-    } else {
-      Serial.print("Unknown command: ");
-      Serial.println(c);
-    }
+  if (client.connected()) {
+    app.process(&client);
+    client.stop();
   }
 }
