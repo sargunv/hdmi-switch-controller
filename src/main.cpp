@@ -1,25 +1,23 @@
+#include "config.h"
+
 #include <Arduino.h>
 
 #define USE_NO_SEND_PWM
-#define IR_SEND_PIN 12
+#define IR_SEND_PIN SIGNAL_PIN
 #include <IRremote.hpp>
 
 #include <WiFi.h>
 #include <aWOT.h>
 
-#include "secrets.h"
+const int numInputs = NUM_INPUTS;
 
-const int numInputs = 5;
+const int necAddress = NEC_ADDRESS;
+const int necInputCommands[numInputs] = NEC_INPUT_COMMANDS;
 
-const int inputLedPins[numInputs] = {11, 10, 9, 8, 7};
-const int idleLedPin = 6;
-
-const int necInputCommands[numInputs] = {0x1b, 0x1e, 0x0d, 0x12, 0x10};
-const int necAddress = 0x01;
-const int necWakeCommand = 0x5c;
-const int necSleepCommand = 0x1f;
-const int necNextInputCommand = 0x0c;
-const int necPrevInputCommand = 0x05;
+#ifdef ENABLE_WAKE_FROM_IDLE
+const int idleLedPin = IDLE_LED_PIN;
+const int necWakeFromIdleCommand = NEC_WAKE_FROM_IDLE_COMMAND;
+#endif
 
 WiFiServer server(80);
 Application app;
@@ -33,48 +31,17 @@ void sendCommand(int command, Response &res)
   IrSender.sendNEC(necAddress, command, 0);
 }
 
-int checkState()
-{
-  if (digitalRead(idleLedPin) == HIGH) {
-    for (int i = 0; i < numInputs; i++) {
-      if (digitalRead(inputLedPins[i]) == LOW) {
-        return i + 1;
-      }
-    }
-    return -1;
-  } else {
-    return 0;
-  }
-}
-
 void index(Request &req, Response &res)
 {
   res.println("# API");
-
-  res.println("- GET `/status` : get switch status");
 
   res.print("- GET `/input/[1-");
   res.print(numInputs);
   res.println("]` : switch directly to input");
 
-  res.println("- GET `/next` : switch to next input");
-  res.println("- GET `/prev` : switch to previous input");
-  res.println("- GET `/wake` : wake up switch from idle state");
-  res.println("- GET `/sleep` : put switch in idle state");
-}
-
-void getStatus(Request &req, Response &res)
-{
-  int input = checkState();
-  if (input == 0) {
-    res.println("Idle");
-  } else if (input == -1) {
-    res.status(500);
-    res.println("Unknown");
-  } else {
-    res.print("Input ");
-    res.println(input);
-  }
+#ifdef ENABLE_WAKE_FROM_IDLE
+  res.print("- GET `/wake` : wake up from idle");
+#endif
 }
 
 void setInput(Request &req, Response &res)
@@ -87,55 +54,30 @@ void setInput(Request &req, Response &res)
     res.status(400);
     res.println("Invalid input");
   } else {
-    int input = checkState();
-    if (input <= 0) {
-      res.status(422);
-      res.println("Switch is not active");
-    } else {
-      sendCommand(necInputCommands[inputVal], res);
+#ifdef ENABLE_WAKE_FROM_IDLE
+    if (digitalRead(idleLedPin) == LOW) {
+      sendCommand(necWakeFromIdleCommand, res);
+      delay(WAKE_FROM_IDLE_DELAY);
     }
+#endif
+    sendCommand(necInputCommands[inputVal], res);
   }
 }
 
-void wake(Request &req, Response &res)
+#ifdef ENABLE_WAKE_FROM_IDLE
+void wakeFromIdle(Request &req, Response &res)
 {
-  sendCommand(necWakeCommand, res);
+  sendCommand(necWakeFromIdleCommand, res);
 }
-
-void sleep(Request &req, Response &res)
-{
-  sendCommand(necSleepCommand, res);
-}
-
-void nextInput(Request &req, Response &res)
-{
-  int input = checkState();
-  if (input <= 0) {
-    res.status(422);
-    res.println("Switch is not active");
-  } else {
-    sendCommand(necNextInputCommand, res);
-  }
-}
-
-void prevInput(Request &req, Response &res)
-{
-  int input = checkState();
-  if (input <= 0) {
-    res.status(422);
-    res.println("Switch is not active");
-  } else {
-    sendCommand(necPrevInputCommand, res);
-  }
-}
+#endif
 
 void setup()
 {
   pinMode(LED_BUILTIN, OUTPUT);
+
+#ifdef ENABLE_WAKE_FROM_IDLE
   pinMode(idleLedPin, INPUT);
-  for (int i = 0; i < numInputs; i++) {
-    pinMode(inputLedPins[i], INPUT);
-  }
+#endif
 
   Serial.begin(115200);
   IrSender.begin();
@@ -149,12 +91,10 @@ void setup()
   Serial.println(WiFi.localIP());
 
   app.get("/", &index);
-  app.get("/status", &getStatus);
   app.get("/input/:input", &setInput);
-  app.get("/next", &nextInput);
-  app.get("/prev", &prevInput);
-  app.get("/wake", &wake);
-  app.get("/sleep", &sleep);
+#ifdef ENABLE_WAKE_FROM_IDLE
+  app.get("/wake", &wakeFromIdle);
+#endif
 
   server.begin();
 }
